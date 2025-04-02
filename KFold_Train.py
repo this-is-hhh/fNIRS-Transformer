@@ -154,7 +154,7 @@ if __name__ == "__main__":
     data_path = '/data0/zxj_data/predata'
 
     # Save file and avoid training file overwriting.
-    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_bidiction_mamba_ST_GELU/' + models[models_id]
+    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_7regions_ST_GELU/' + models[models_id]
     assert os.path.exists(save_path) is False, 'path is exist'
     os.makedirs(save_path)
 
@@ -412,9 +412,7 @@ if __name__ == "__main__":
                 # 初始化每个类别的统计变量
                 
                 class_correct = [0] * num_classes  # 每个类别预测正确的样本数
-                class_total = [0] * num_classes    # 每个类别的总样本数
-
-                
+                class_total = [0] * num_classes    # 每个类别的总样本数    
                 
                 net.eval()
                 test_running_acc = 0

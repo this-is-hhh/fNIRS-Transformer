@@ -39,7 +39,7 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.,num_channels=53, num_regions=7):
         super().__init__()
         inner_dim = dim_head * heads
         project_out = not (heads == 1 and dim_head == dim)
@@ -54,6 +54,23 @@ class Attention(nn.Module):
             nn.Dropout(dropout)
         ) if project_out else nn.Identity()
 
+        self.region_to_channels = [
+            [channel + 6 for channel in region]
+            for region in [
+                [1, 4, 10],
+                [40, 47, 52],
+                [2, 3, 5, 7, 8, 13],
+                [44, 46, 49, 50, 51, 53],
+                [6, 11, 14, 17, 18, 20, 25, 31, 32, 34, 39, 42, 45],
+                [12, 24, 26, 38],
+                [9, 15, 16, 19, 21, 22, 23, 27, 28, 29, 30, 33, 35, 36, 37, 41, 43, 48],
+            ]
+        ]
+
+        self.num_regions = num_regions
+        self.num_channels = num_channels
+
+
     def forward(self, x, mask=None):
         b, n, _, h = *x.shape, self.heads
         qkv = self.to_qkv(x).chunk(3, dim=-1)
@@ -61,20 +78,36 @@ class Attention(nn.Module):
 
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
         mask_value = -torch.finfo(dots.dtype).max
+        # if mask is not None:
+        #     mask = F.pad(mask.flatten(1), (1, 0), value=True)
+        #     assert mask.shape[-1] == dots.shape[-1], 'mask has incorrect dimensions'
+        #     mask = rearrange(mask, 'b i -> b () i ()') * rearrange(mask, 'b j -> b () () j')
+        #     dots.masked_fill_(~mask, mask_value)
+        #     del mask
 
-        if mask is not None:
-            mask = F.pad(mask.flatten(1), (1, 0), value=True)
-            assert mask.shape[-1] == dots.shape[-1], 'mask has incorrect dimensions'
-            mask = rearrange(mask, 'b i -> b () i ()') * rearrange(mask, 'b j -> b () () j')
-            dots.masked_fill_(~mask, mask_value)
-            del mask
+         # 生成交互掩码
+        interaction_mask = torch.zeros((1, n, n), dtype=torch.bool, device=x.device)
+        
+        # Region tokens 只能与指定的通道交互
+        for region_idx, channel_indices in enumerate(self.region_to_channels):
+            interaction_mask[:, region_idx, channel_indices] = True
+            interaction_mask[:, channel_indices, region_idx] = True
+        
+        # 其他通道可以相互交互
+        interaction_mask[:, self.num_regions:, self.num_regions:] = True
+
+        dots.masked_fill_(~interaction_mask, mask_value)
+
 
         attn = dots.softmax(dim=-1)
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
+
         return out
+        # 只返回 7 个 region tokens
+        # return out[:, :self.num_regions, :]
 
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
@@ -142,8 +175,8 @@ class fNIRS_T(nn.Module):
         # self.transformer_patch = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
 
         self.pos_embedding_channel = nn.Parameter(torch.randn(1, num_channels + 7, dim))
-        self.cls_token_channel = nn.Parameter(torch.randn(1, 1, dim))
-        # self.region_token_channel = nn.Parameter(torch.randn(1, 7, dim))
+        # self.cls_token_channel = nn.Parameter(torch.randn(1, 1, dim))
+        self.region_token_channel = nn.Parameter(torch.randn(1, 7, dim))
         
         self.dropout_channel = nn.Dropout(emb_dropout)
 
@@ -170,22 +203,25 @@ class fNIRS_T(nn.Module):
         print("x2.shape:", x2.shape)   
         # (16,53,128)
         b, n, _ = x2.shape
-        cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)
-        x2 = torch.cat((cls_tokens, x2), dim=1)
-        print("x2.shape + cls_tokens:", x2.shape)
+        # cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)
+        # x2 = torch.cat((cls_tokens, x2), dim=1)
+        region_tokens = repeat(self.region_token_channel, '() n d -> b n d', b=b)
+        x2 = torch.cat((region_tokens, x2), dim=1)
+        # print("x2.shape + region_tokens:", x2.shape)
 
-        x2 += self.pos_embedding_channel[:, :(n + 1)]
-        print("x2.shape + pos_embedding_channel:", x2.shape)
+        x2 += self.pos_embedding_channel[:, :(n + 7)]
+        # print("x2.shape + pos_embedding_channel:", x2.shape)
         x2 = self.dropout_channel(x2)
         x2 = self.transformer_channel(x2, mask)
         
         # for layer in self.mamba_layers:
         #     x2 = layer(x2)
 
-        print("x2.shape after transformer_channel:", x2.shape)
+        # print("x2.shape after transformer_channel:", x2.shape)
         # x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
+        x2 = x2[:, :7, :]
         x2 = x2.mean(dim=1) if self.pool == 'mean' else x2[:, 0]
-        print("x2.shape after mean:", x2.shape)
+        # print("x2.shape after mean:", x2.shape)
         # x = self.to_latent(x)
         # x2 = self.to_latent(x2)
         # x3 = torch.cat((x, x2), 1)
