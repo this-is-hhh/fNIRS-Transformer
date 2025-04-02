@@ -91,6 +91,23 @@ class Transformer(nn.Module):
             x = ff(x)
         return x
 
+
+class BidirectionalMambaBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.mamba_forward = Mamba(dim)
+        self.mamba_reverse = Mamba(dim)
+
+    def forward(self, x):
+        z1 = self.mamba_forward(x)
+        z2 = torch.flip(x, dims=[1])  # Reverse the sequence
+        z2 = self.mamba_reverse(z2)
+        z2 = torch.flip(z2, dims=[1])  # Flip back after processing
+        
+        z_prime = z1 + z2
+        z_double_prime = z_prime + x
+        return z_double_prime
+
 class fNIRS_T(nn.Module):
     """
     fNIRS-T model
@@ -109,15 +126,8 @@ class fNIRS_T(nn.Module):
     """
     def __init__(self, n_class, sampling_point, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
-        num_patches = 100
+        # num_patches = 100
         num_channels = 100
-
-        self.to_patch_embedding = nn.Sequential(
-            nn.Conv2d(in_channels=2, out_channels=8, kernel_size=(5, 30), stride=(1, 4)),
-            Rearrange('b c h w  -> b h (c w)'),
-            # output width * out channels --> dim
-            nn.Linear((math.floor((sampling_point-30)/4)+1)*8, dim),
-            nn.LayerNorm(dim))
 
         self.to_channel_embedding = nn.Sequential(
             nn.Conv2d(in_channels=2, out_channels=8, kernel_size=(1, 30), stride=(1, 4)),
@@ -125,19 +135,20 @@ class fNIRS_T(nn.Module):
             nn.Linear((math.floor((sampling_point-30)/4)+1)*8, dim),
             nn.LayerNorm(dim))
 
-        self.pos_embedding_patch = nn.Parameter(torch.randn(1, num_patches + 1, dim))
-        self.cls_token_patch = nn.Parameter(torch.randn(1, 1, dim))
-        self.dropout_patch = nn.Dropout(emb_dropout)
+        # self.pos_embedding_patch = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        # self.cls_token_patch = nn.Parameter(torch.randn(1, 1, dim))
+        # self.dropout_patch = nn.Dropout(emb_dropout)
 
-        self.transformer_patch = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        # self.mamba_patch = nn.Sequential(*[Residual(Mamba(dim)) for _ in range(depth+3)])
+        # self.transformer_patch = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
 
-        self.pos_embedding_channel = nn.Parameter(torch.randn(1, num_channels + 1, dim))
+        self.pos_embedding_channel = nn.Parameter(torch.randn(1, num_channels + 7, dim))
         self.cls_token_channel = nn.Parameter(torch.randn(1, 1, dim))
+        # self.region_token_channel = nn.Parameter(torch.randn(1, 7, dim))
+        
         self.dropout_channel = nn.Dropout(emb_dropout)
 
         self.transformer_channel = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        # self.mamba_channel = nn.Sequential(*[Residual(Mamba(dim)) for _ in range(depth+3)])
+        self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(dim) for _ in range(depth)])
 
         self.pool = pool
         self.to_latent = nn.Identity()
@@ -147,29 +158,37 @@ class fNIRS_T(nn.Module):
 
 
     def forward(self, img, mask=None):
-        x = self.to_patch_embedding(img)
-        b, n, _ = x.shape
-        cls_tokens = repeat(self.cls_token_patch, '() n d -> b n d', b=b)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x += self.pos_embedding_patch[:, :(n + 1)]
-        x = self.dropout_patch(x)
-        x = self.transformer_patch(x, mask)
+        # x = self.to_patch_embedding(img)
+        # b, n, _ = x.shape
+        # cls_tokens = repeat(self.cls_token_patch, '() n d -> b n d', b=b)
+        # x = torch.cat((cls_tokens, x), dim=1)
+        # x += self.pos_embedding_patch[:, :(n + 1)]
+        # x = self.dropout_patch(x)
+        # x = self.transformer_patch(x, mask)
+        print("img.shape:", img.shape)
+        x2 = self.to_channel_embedding(img)    
+        print("x2.shape:", x2.shape)   
+        # (16,53,128)
+        b, n, _ = x2.shape
+        cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)
+        x2 = torch.cat((cls_tokens, x2), dim=1)
+        print("x2.shape + cls_tokens:", x2.shape)
 
-        # x2 = self.to_channel_embedding(img.squeeze())       
-        # b, n, _ = x2.shape
-        # cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)
-        # x2 = torch.cat((cls_tokens, x2), dim=1)
-        # x2 += self.pos_embedding_channel[:, :(n + 1)]
-        # x2 = self.dropout_channel(x2)
-        # x2 = self.transformer_channel(x2, mask)
+        x2 += self.pos_embedding_channel[:, :(n + 1)]
+        print("x2.shape + pos_embedding_channel:", x2.shape)
+        x2 = self.dropout_channel(x2)
+        x2 = self.transformer_channel(x2, mask)
         
+        # for layer in self.mamba_layers:
+        #     x2 = layer(x2)
 
-        x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
-        # x2 = x2.mean(dim=1) if self.pool == 'mean' else x2[:, 0]
-
+        print("x2.shape after transformer_channel:", x2.shape)
+        # x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
+        x2 = x2.mean(dim=1) if self.pool == 'mean' else x2[:, 0]
+        print("x2.shape after mean:", x2.shape)
         # x = self.to_latent(x)
         # x2 = self.to_latent(x2)
         # x3 = torch.cat((x, x2), 1)
 
         # return self.mlp_head(x3)
-        return self.mlp_head(x)
+        return self.mlp_head(x2)

@@ -3,10 +3,9 @@ from sklearn.model_selection import RepeatedKFold
 import numpy as np
 # from model import fNIRS_T, fNIRS_PreT
 from model import fNIRS_T
-from dataloader import Dataset, Load_Dataset_A, Load_Dataset_B, Load_Dataset_C, Load_Dataset_D
+from dataloader import Dataset, Load_Dataset_A, Load_Dataset_B, Load_Dataset_C
 import os
 import matplotlib.pyplot as plt
-from data_augmentation import apply_time_augmentations
 import random
 
 class LabelSmoothing(torch.nn.Module):
@@ -155,7 +154,7 @@ if __name__ == "__main__":
     data_path = '/data0/zxj_data/predata'
 
     # Save file and avoid training file overwriting.
-    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_transformer_ST_GELU/' + models[models_id]
+    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_bidiction_mamba_ST_GELU/' + models[models_id]
     assert os.path.exists(save_path) is False, 'path is exist'
     os.makedirs(save_path)
 
@@ -295,7 +294,7 @@ if __name__ == "__main__":
                 net = fNIRS_PreT(n_class=3, sampling_point=sampling_points, dim=128, depth=6, heads=8, mlp_dim=64).to(device)
         elif dataset[dataset_id] == 'D':
             if models[models_id] == 'fNIRS-T':
-                net = fNIRS_T(n_class=2, sampling_point=sampling_points, dim=128, depth=6, heads=8, mlp_dim=64).to(device)
+                net = fNIRS_T(n_class=2, sampling_point=sampling_points, dim = 128, depth=6, heads=8, mlp_dim=64).to(device)
         
 
         criterion = torch.nn.CrossEntropyLoss()  # 数据平衡时
