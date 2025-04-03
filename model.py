@@ -141,6 +141,33 @@ class BidirectionalMambaBlock(nn.Module):
         z_double_prime = z_prime + x
         return z_double_prime
 
+class MultiScaleEmbedding(nn.Module):
+    def __init__(self, in_channels, out_channels, sampling_point, dim, kernel_lengths, stride):
+        super().__init__()
+        self.conv_layers = nn.ModuleList([
+            nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                      kernel_size=(1, k), stride=(1, stride),
+                      padding=(0, (k - 1) // 2))  # 添加 padding
+            for k in kernel_lengths
+        ])
+        out_w = math.floor((sampling_point - max(kernel_lengths) + (max(kernel_lengths) - 1) // 2 * 2) / stride) + 1
+        self.proj = nn.Linear(len(kernel_lengths) * out_channels * out_w, dim)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        # print("x.shape:", x.shape)
+        features = [conv(x) for conv in self.conv_layers]
+        # print("features.shape:", features[0].shape)
+        features = torch.cat(features, dim=1)  # 现在所有 feature 维度匹配了
+        # print("features.shape after cat:", features.shape)
+        features = rearrange(features, 'b c h w -> b h (c w)')
+        # print("features.shape after rearrange:", features.shape)
+        features = self.proj(features)
+        # print("features.shape after proj:", features.shape)
+        return self.norm(features)
+        
+
+
 class fNIRS_T(nn.Module):
     """
     fNIRS-T model
@@ -162,11 +189,15 @@ class fNIRS_T(nn.Module):
         # num_patches = 100
         num_channels = 100
 
-        self.to_channel_embedding = nn.Sequential(
-            nn.Conv2d(in_channels=2, out_channels=8, kernel_size=(1, 30), stride=(1, 4)),
-            Rearrange('b c h w  -> b h (c w)'),
-            nn.Linear((math.floor((sampling_point-30)/4)+1)*8, dim),
-            nn.LayerNorm(dim))
+        # self.to_channel_embedding = nn.Sequential(
+        #     nn.Conv2d(in_channels=2, out_channels=8, kernel_size=(1, 30), stride=(1, 4)),
+        #     Rearrange('b c h w  -> b h (c w)'),
+        #     nn.Linear((math.floor((sampling_point-30)/4)+1)*8, dim),
+        #     nn.LayerNorm(dim))
+
+        self.to_channel_embedding = MultiScaleEmbedding(
+            in_channels=2, out_channels=8, sampling_point=sampling_point, dim=dim, kernel_lengths=[50, 25, 12], stride=4
+        )
 
         # self.pos_embedding_patch = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         # self.cls_token_patch = nn.Parameter(torch.randn(1, 1, dim))
@@ -198,9 +229,9 @@ class fNIRS_T(nn.Module):
         # x += self.pos_embedding_patch[:, :(n + 1)]
         # x = self.dropout_patch(x)
         # x = self.transformer_patch(x, mask)
-        print("img.shape:", img.shape)
+        # print("img.shape:", img.shape)
         x2 = self.to_channel_embedding(img)    
-        print("x2.shape:", x2.shape)   
+        # print("x2.shape:", x2.shape)   
         # (16,53,128)
         b, n, _ = x2.shape
         # cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)

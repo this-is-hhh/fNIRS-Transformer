@@ -1,5 +1,5 @@
 import torch
-from sklearn.model_selection import RepeatedKFold
+from sklearn.model_selection import RepeatedKFold, StratifiedKFold
 import numpy as np
 # from model import fNIRS_T, fNIRS_PreT
 from model import fNIRS_T
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     data_path = '/data0/zxj_data/predata'
 
     # Save file and avoid training file overwriting.
-    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_7regions_ST_GELU/' + models[models_id]
+    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_7regions_ST_GELU_multiscale_50/' + models[models_id]
     assert os.path.exists(save_path) is False, 'path is exist'
     os.makedirs(save_path)
 
@@ -222,12 +222,16 @@ if __name__ == "__main__":
     # 5 × 5-fold-CV
 
     indices = np.arange(len(feature))
-    np.random.shuffle(indices)
+    rng = np.random.default_rng(2025)  # 固定 NumPy 生成器
+    rng.shuffle(indices)
+
+    # indices = np.arange(len(feature))
+    # np.random.shuffle(indices)
     feature = feature[indices]
     label = label[indices]
 
-    rkf = RepeatedKFold(n_splits=4, n_repeats=4, random_state=2025)
-
+    # rkf = RepeatedKFold(n_splits=4, n_repeats=4, random_state=2025)
+    skf = StratifiedKFold(n_splits=4, shuffle=True, random_state=2025)
 
     # 记录每个 epoch 的训练和测试信息
     train_losses = []
@@ -236,8 +240,8 @@ if __name__ == "__main__":
     test_accuracies = []
 
     n_runs = 0
-    for train_index, test_index in rkf.split(feature):
-        
+    # for train_index, test_index in skf.split(feature):
+    for fold, (train_index, test_index) in enumerate(skf.split(feature, label)):
         n_runs += 1
         print('======================================\n', n_runs)
         path = save_path + '/' + str(n_runs)
