@@ -153,10 +153,12 @@ if __name__ == "__main__":
     # Select the specified path
     data_path = '/data0/zxj_data/predata'
 
-    # Save file and avoid training file overwriting.
-    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + '/KFold/1086_7regions_ST_GELU_multiscale_50/' + models[models_id]
-    assert os.path.exists(save_path) is False, 'path is exist'
-    os.makedirs(save_path)
+    # Generate unique save path with timestamp and experiment config
+    from datetime import datetime
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    exp_config = f"{models[models_id]}_dim{64 if dataset[dataset_id] in ['A', 'B'] else 128}"
+    save_path = '/data1/zxj_log/save/' + dataset[dataset_id] + f'/KFold/{timestamp}_{exp_config}'
+    os.makedirs(save_path, exist_ok=True)
 
     # Load dataset and set flooding levels. Different models may have different flooding levels.
     if dataset[dataset_id] == 'A':
@@ -301,8 +303,8 @@ if __name__ == "__main__":
                 net = fNIRS_T(n_class=2, sampling_point=sampling_points, dim = 128, depth=6, heads=8, mlp_dim=64).to(device)
         
 
-        criterion = torch.nn.CrossEntropyLoss()  # 数据平衡时
-        # criterion = LabelSmoothing(0.1)
+        criterion = LabelSmoothing(0.1)  # 使用标签平滑，平滑系数为0.1
+        # criterion = torch.nn.CrossEntropyLoss()  # 数据平衡时
         
         # 基于样本数量的比例
         # total_samples = 79 + 17
@@ -442,44 +444,80 @@ if __name__ == "__main__":
                             class_correct[label_int] += (predicted_label == label_int)
                             class_total[label_int] += 1
 
-                    test_running_acc = 100 * test_running_acc / total
-                    test_running_loss = float(np.mean(loss_steps))
+                # 初始化混淆矩阵指标
+                tp = fp = fn = tn = 0
+                for data in test_loader:
+                    inputs, labels = data
+                    inputs = inputs.to(device)
+                    labels = labels.to(device)
+                    outputs = net(inputs)
+                    pred = outputs.argmax(dim=1)
+                    
+                    # 累积统计混淆矩阵
+                    for i in range(labels.size(0)):
+                        if pred[i] == 1 and labels[i] == 1:
+                            tp += 1
+                        elif pred[i] == 1 and labels[i] == 0:
+                            fp += 1
+                        elif pred[i] == 0 and labels[i] == 1:
+                            fn += 1
+                        else:  # pred[i] == 0 and labels[i] == 0
+                            tn += 1
+                
+                # 计算评估指标
+                test_running_acc = 100 * test_running_acc / total
+                test_running_loss = float(np.mean(loss_steps))
+                
+                # 计算精确率和召回率
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                
+                # 计算F1分数
+                f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+                
+                print(f'     Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1_score:.4f}')
+                print(f'     Confusion Matrix: TP={tp}, FP={fp}, FN={fn}, TN={tn}')
 
+                # 打印每个类别的准确率
+                log_file.write('     test Class-wise accuracy:\n')
+                print('     test Class-wise accuracy:')
+                for i in range(num_classes):
+                    if class_total[i] > 0:
+                        acc = 100.0 * class_correct[i] / class_total[i]
+                        print(f'     Class {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})')
+                    else:
+                        print(f'     Class {i}: No samples')
 
-                    # 打印每个类别的准确率
-                    log_file.write('     test Class-wise accuracy:\n')
-                    print('     test Class-wise accuracy:')
+                # 保存到文件（可选）
+                with open(os.path.join(path, f'classwise_accuracy_run_{n_runs}.txt'), 'w') as f:
+                    f.write(f'Test Accuracy: {test_running_acc:.3f}%\n')
+                    f.write('Class-wise accuracy:\n')
                     for i in range(num_classes):
                         if class_total[i] > 0:
                             acc = 100.0 * class_correct[i] / class_total[i]
-                            print(f'     Class {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})')
+                            log_file.write(f'     Class {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})\n')
                         else:
-                            print(f'     Class {i}: No samples')
-
-                    # 保存到文件（可选）
-                    with open(os.path.join(path, f'classwise_accuracy_run_{n_runs}.txt'), 'w') as f:
-                        f.write(f'Test Accuracy: {test_running_acc:.3f}%\n')
-                        f.write('Class-wise accuracy:\n')
-                        for i in range(num_classes):
-                            if class_total[i] > 0:
-                                acc = 100.0 * class_correct[i] / class_total[i]
-                                log_file.write(f'     Class {i}: {acc:.2f}% ({class_correct[i]}/{class_total[i]})\n')
-                            else:
-                                log_file.write(f'     Class {i}: No samples\n')
+                            log_file.write(f'     Class {i}: No samples\n')
 
 
-                    print('     [%d, %d] Test loss: %0.4f' % (n_runs, epoch, test_running_loss))
-                    print('     [%d, %d] Test acc: %0.3f%%' % (n_runs, epoch, test_running_acc))
-                    log_file.write(f'     [{n_runs}, {epoch}] Test loss: {test_running_loss:.4f}\n')
-                    log_file.write(f'     [{n_runs}, {epoch}] Test acc: {test_running_acc:.3f}%\n')
-                    test_losses.append(test_running_loss)
-                    test_accuracies.append(test_running_acc)
+                print('     [%d, %d] Test loss: %0.4f' % (n_runs, epoch, test_running_loss))
+                print('     [%d, %d] Test acc: %0.3f%%' % (n_runs, epoch, test_running_acc))
+                print('     [%d, %d] Test F1: %0.3f (P: %0.3f, R: %0.3f)' % (n_runs, epoch, f1_score, precision, recall))
+                log_file.write(f'     [{n_runs}, {epoch}] Test loss: {test_running_loss:.4f}\n')
+                log_file.write(f'     [{n_runs}, {epoch}] Test acc: {test_running_acc:.3f}%\n')
+                log_file.write(f'     [{n_runs}, {epoch}] Test F1: {f1_score:.3f} (P: {precision:.3f}, R: {recall:.3f})\n')
+                test_losses.append(test_running_loss)
+                test_accuracies.append(test_running_acc)
 
-                    if test_running_acc > test_max_acc:
-                        test_max_acc = test_running_acc
-                        torch.save(net.state_dict(), path + '/model.pt')
-                        with open(path + '/test_acc.txt', "w") as test_save:
-                            test_save.write(f"{test_running_acc:.3f}")
+                if f1_score > test_max_acc:  # 使用F1分数作为保存模型的指标
+                    test_max_acc = f1_score
+                    torch.save(net.state_dict(), path + '/model.pt')
+                    with open(path + '/test_metrics.txt', "w") as test_save:
+                        test_save.write(f"F1 Score: {f1_score:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nAccuracy: {test_running_acc:.3f}%")
+                    
+                    # 保存模型结构信息
+                    with open(path + '/model_structure.txt', "w") as model_structure_file:
+                        model_structure_file.write(f"7 regions, multiscale 50\n")
 
                 lrStep.step()
 

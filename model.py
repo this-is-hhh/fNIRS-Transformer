@@ -47,6 +47,7 @@ class Attention(nn.Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
 
+        # 输入维度是dim（可能是原始dim的2倍）
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
 
         self.to_out = nn.Sequential(
@@ -141,6 +142,53 @@ class BidirectionalMambaBlock(nn.Module):
         z_double_prime = z_prime + x
         return z_double_prime
 
+class FrequencyDomainEmbedding(nn.Module):
+    def __init__(self, in_channels, out_channels, sampling_point, dim, n_freq_bands=10):
+        super().__init__()
+        self.n_freq_bands = n_freq_bands
+        self.sampling_point = sampling_point
+        
+        # 频域特征提取卷积层
+        self.freq_conv = nn.Conv1d(in_channels=n_freq_bands, out_channels=out_channels, 
+                                  kernel_size=3, padding=1)
+        
+        # 投影层将频域特征映射到指定维度
+        self.proj = nn.Linear(out_channels * in_channels, dim)
+        self.norm = nn.LayerNorm(dim)
+        
+    def forward(self, x):
+        # x shape: [batch, 2, channels, sampling_points]
+        batch, types, channels, _ = x.shape
+        
+        # 对每个通道进行FFT变换
+        freq_features = []
+        for t in range(types):  # 对脱氧和有氧分别处理
+            for c in range(channels):  # 对每个通道处理
+                # 提取当前通道的时域信号
+                signal = x[:, t, c, :]
+                
+                # 应用FFT
+                fft_result = torch.fft.fft(signal, dim=1)
+                magnitudes = torch.abs(fft_result[:, :self.n_freq_bands])  # 只取前n_freq_bands个频带
+                
+                # 归一化
+                if torch.max(magnitudes) > 0:
+                    magnitudes = magnitudes / torch.max(magnitudes)
+                
+                freq_features.append(magnitudes)
+        
+        # 将所有频域特征堆叠 [batch, channels*types, n_freq_bands]
+        freq_features = torch.stack(freq_features, dim=1)
+        
+        # 应用卷积提取频域特征 [batch, channels*types, out_channels]
+        freq_features = self.freq_conv(freq_features.transpose(1, 2)).transpose(1, 2)
+        
+        # 展平并投影到指定维度
+        freq_features = freq_features.reshape(batch, channels, -1)
+        freq_features = self.proj(freq_features)
+        
+        return self.norm(freq_features)
+
 class MultiScaleEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels, sampling_point, dim, kernel_lengths, stride):
         super().__init__()
@@ -153,18 +201,35 @@ class MultiScaleEmbedding(nn.Module):
         out_w = math.floor((sampling_point - max(kernel_lengths) + (max(kernel_lengths) - 1) // 2 * 2) / stride) + 1
         self.proj = nn.Linear(len(kernel_lengths) * out_channels * out_w, dim)
         self.norm = nn.LayerNorm(dim)
+        
+        # 添加频域特征提取
+        self.freq_embedding = FrequencyDomainEmbedding(
+            in_channels=in_channels, 
+            out_channels=out_channels, 
+            sampling_point=sampling_point, 
+            dim=dim, 
+            n_freq_bands=20
+        )
 
     def forward(self, x):
-        # print("x.shape:", x.shape)
+        # 时域特征提取
         features = [conv(x) for conv in self.conv_layers]
-        # print("features.shape:", features[0].shape)
         features = torch.cat(features, dim=1)  # 现在所有 feature 维度匹配了
-        # print("features.shape after cat:", features.shape)
         features = rearrange(features, 'b c h w -> b h (c w)')
-        # print("features.shape after rearrange:", features.shape)
         features = self.proj(features)
-        # print("features.shape after proj:", features.shape)
-        return self.norm(features)
+        time_features = self.norm(features)
+        
+        # 频域特征提取
+        freq_features = self.freq_embedding(x)
+        
+        # 拼接时域和频域特征
+        # 将同一通道的频域和时域特征在维度上拼接，而不是在序列长度上拼接
+        # 时域特征形状: [batch, num_channels, dim]
+        # 频域特征形状: [batch, num_channels, dim]
+        # 拼接后形状: [batch, num_channels, 2*dim]
+        combined_features = torch.cat([freq_features, time_features], dim=2)
+        
+        return combined_features
         
 
 
@@ -187,75 +252,73 @@ class fNIRS_T(nn.Module):
     def __init__(self, n_class, sampling_point, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
         # num_patches = 100
-        num_channels = 100
+        num_channels = 53  # 实际的fNIRS通道数
+        # 由于MultiScaleEmbedding返回的特征维度是2*dim，我们需要调整模型的其他部分
+        feature_dim = 2 * dim  # 特征维度为原始dim的两倍
 
-        # self.to_channel_embedding = nn.Sequential(
-        #     nn.Conv2d(in_channels=2, out_channels=8, kernel_size=(1, 30), stride=(1, 4)),
-        #     Rearrange('b c h w  -> b h (c w)'),
-        #     nn.Linear((math.floor((sampling_point-30)/4)+1)*8, dim),
-        #     nn.LayerNorm(dim))
-
+        # 多尺度时域特征提取
         self.to_channel_embedding = MultiScaleEmbedding(
             in_channels=2, out_channels=8, sampling_point=sampling_point, dim=dim, kernel_lengths=[50, 25, 12], stride=4
         )
 
-        # self.pos_embedding_patch = nn.Parameter(torch.randn(1, num_patches + 1, dim))
-        # self.cls_token_patch = nn.Parameter(torch.randn(1, 1, dim))
-        # self.dropout_patch = nn.Dropout(emb_dropout)
-
-        # self.transformer_patch = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-
-        self.pos_embedding_channel = nn.Parameter(torch.randn(1, num_channels + 7, dim))
-        # self.cls_token_channel = nn.Parameter(torch.randn(1, 1, dim))
-        self.region_token_channel = nn.Parameter(torch.randn(1, 7, dim))
+        # 计算位置编码的大小：7个区域令牌 + 通道特征数量
+        # 频域和时域特征在维度上拼接，序列长度为num_channels
+        total_tokens = 7 + num_channels  # token数量为区域令牌 + 通道特征（每个通道包含频域和时域信息）
+        
+        # 位置编码 - 注意：维度需要调整为feature_dim以匹配拼接后的特征维度
+        self.pos_embedding_channel = nn.Parameter(torch.randn(1, total_tokens, feature_dim))
+        
+        # 区域令牌 - 维度需要调整为feature_dim以匹配拼接后的特征维度
+        self.region_token_channel = nn.Parameter(torch.randn(1, 7, feature_dim))
         
         self.dropout_channel = nn.Dropout(emb_dropout)
 
-        self.transformer_channel = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
-        self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(dim) for _ in range(depth)])
+        # Transformer和Mamba层 - 维度需要调整为feature_dim
+        self.transformer_channel = Transformer(feature_dim, depth, heads, dim_head, mlp_dim, dropout)
+        self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
 
         self.pool = pool
         self.to_latent = nn.Identity()
+        # 增强的MLP头部结构，包含两个全连接层和ReLU激活函数
         self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, n_class))
+            nn.LayerNorm(feature_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(feature_dim, n_class))
 
 
     def forward(self, img, mask=None):
-        # x = self.to_patch_embedding(img)
-        # b, n, _ = x.shape
-        # cls_tokens = repeat(self.cls_token_patch, '() n d -> b n d', b=b)
-        # x = torch.cat((cls_tokens, x), dim=1)
-        # x += self.pos_embedding_patch[:, :(n + 1)]
-        # x = self.dropout_patch(x)
-        # x = self.transformer_patch(x, mask)
-        # print("img.shape:", img.shape)
+        # 获取时域和频域特征，现在形状为 [batch, num_channels, 2*dim]
         x2 = self.to_channel_embedding(img)    
-        # print("x2.shape:", x2.shape)   
-        # (16,53,128)
-        b, n, _ = x2.shape
-        # cls_tokens = repeat(self.cls_token_channel, '() n d -> b n d', b=b)
-        # x2 = torch.cat((cls_tokens, x2), dim=1)
-        region_tokens = repeat(self.region_token_channel, '() n d -> b n d', b=b)
-        x2 = torch.cat((region_tokens, x2), dim=1)
-        # print("x2.shape + region_tokens:", x2.shape)
-
-        x2 += self.pos_embedding_channel[:, :(n + 7)]
-        # print("x2.shape + pos_embedding_channel:", x2.shape)
-        x2 = self.dropout_channel(x2)
-        x2 = self.transformer_channel(x2, mask)
         
-        # for layer in self.mamba_layers:
-        #     x2 = layer(x2)
-
-        # print("x2.shape after transformer_channel:", x2.shape)
-        # x = x.mean(dim=1) if self.pool == 'mean' else x[:, 0]
+        b, n, d = x2.shape
+        
+        # 不再分割频域和时域特征，而是直接使用它们的组合
+        # x2的形状为 [batch, num_channels, 2*dim]，其中包含了频域和时域信息
+        
+        # 添加区域令牌到特征中
+        region_tokens = repeat(self.region_token_channel, '() n d -> b n d', b=b)
+        
+        # 将区域令牌与通道特征组合（通道特征已经包含了频域和时域信息）
+        # 在序列维度上拼接区域令牌和通道特征
+        combined_features = torch.cat([region_tokens, x2], dim=1)
+        
+        # 添加位置编码
+        # 注意：位置编码的大小需要匹配 7(区域令牌) + n(通道特征)
+        combined_features += self.pos_embedding_channel[:, :combined_features.shape[1]]
+        combined_features = self.dropout_channel(combined_features)
+        # print("combined_features: ", combined_features.shape)
+        # print("region_tokens: ", region_tokens.shape)
+        # print("x2: ", x2.shape)
+        # print("pos_embedding_channel: ", self.pos_embedding_channel.shape)
+        # print("pos_embedding_channel[:, :combined_features.shape[1]]: ", self.pos_embedding_channel[:, :combined_features.shape[1]].shape)
+        # print("combined_features + pos_embedding_channel[:, :combined_features.shape[1]]: ", combined_features.shape)
+        # 通过transformer处理
+        x2 = self.transformer_channel(combined_features, mask)
+        # print("x2 after transformer: ", x2.shape)
+        
+        # 只取区域令牌部分进行分类（前7个token）
         x2 = x2[:, :7, :]
         x2 = x2.mean(dim=1) if self.pool == 'mean' else x2[:, 0]
-        # print("x2.shape after mean:", x2.shape)
-        # x = self.to_latent(x)
-        # x2 = self.to_latent(x2)
-        # x3 = torch.cat((x, x2), 1)
-
-        # return self.mlp_head(x3)
+        
         return self.mlp_head(x2)
