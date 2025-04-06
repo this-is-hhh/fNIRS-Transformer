@@ -86,6 +86,7 @@ class Attention(nn.Module):
         #     dots.masked_fill_(~mask, mask_value)
         #     del mask
 
+        
          # 生成交互掩码
         interaction_mask = torch.zeros((1, n, n), dtype=torch.bool, device=x.device)
         
@@ -94,6 +95,9 @@ class Attention(nn.Module):
             interaction_mask[:, region_idx, channel_indices] = True
             interaction_mask[:, channel_indices, region_idx] = True
         
+        # 添加区域令牌之间的交互
+        interaction_mask[:, :self.num_regions, :self.num_regions] = True
+
         # 其他通道可以相互交互
         interaction_mask[:, self.num_regions:, self.num_regions:] = True
 

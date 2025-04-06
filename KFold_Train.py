@@ -7,6 +7,7 @@ from dataloader import Dataset, Load_Dataset_A, Load_Dataset_B, Load_Dataset_C
 import os
 import matplotlib.pyplot as plt
 import random
+from sklearn.metrics import roc_curve, auc, confusion_matrix
 
 class LabelSmoothing(torch.nn.Module):
     """NLL loss with label smoothing."""
@@ -415,10 +416,12 @@ if __name__ == "__main__":
                 train_accuracies.append(train_running_acc)
 
                 # -------------------------------------------------------------------------------------------------------------------- #
-                # 初始化每个类别的统计变量
-                
+                # 初始化每个类别的统计变量和混淆矩阵指标
                 class_correct = [0] * num_classes  # 每个类别预测正确的样本数
-                class_total = [0] * num_classes    # 每个类别的总样本数    
+                class_total = [0] * num_classes    # 每个类别的总样本数
+                tp = fp = fn = tn = 0  # 混淆矩阵指标
+                all_labels = []  # 用于ROC曲线
+                all_probs = []   # 用于ROC曲线
                 
                 net.eval()
                 test_running_acc = 0
@@ -437,32 +440,29 @@ if __name__ == "__main__":
                         pred = outputs.argmax(dim=1, keepdim=True)
                         test_running_acc += pred.eq(labels.view_as(pred)).sum().item()
 
-                        # 按类别统计
+                        # 保存标签和预测概率用于ROC曲线（二分类问题）
+                        if num_classes == 2:
+                            probs = torch.softmax(outputs, dim=1)[:, 1].cpu().detach().numpy()
+                            all_probs.extend(probs)
+                            all_labels.extend(labels.cpu().numpy())
+                        
+                        # 按类别统计和累积混淆矩阵
                         for i in range(labels.size(0)):
                             label_int = int(labels[i].item())  # 获取原始标签整数值
                             predicted_label = int(pred[i].item())  # 获取预测标签整数值
                             class_correct[label_int] += (predicted_label == label_int)
                             class_total[label_int] += 1
-
-                # 初始化混淆矩阵指标
-                tp = fp = fn = tn = 0
-                for data in test_loader:
-                    inputs, labels = data
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
-                    outputs = net(inputs)
-                    pred = outputs.argmax(dim=1)
-                    
-                    # 累积统计混淆矩阵
-                    for i in range(labels.size(0)):
-                        if pred[i] == 1 and labels[i] == 1:
-                            tp += 1
-                        elif pred[i] == 1 and labels[i] == 0:
-                            fp += 1
-                        elif pred[i] == 0 and labels[i] == 1:
-                            fn += 1
-                        else:  # pred[i] == 0 and labels[i] == 0
-                            tn += 1
+                            
+                            # 累积统计混淆矩阵（二分类问题）
+                            if num_classes == 2:
+                                if predicted_label == 1 and label_int == 1:
+                                    tp += 1
+                                elif predicted_label == 1 and label_int == 0:
+                                    fp += 1
+                                elif predicted_label == 0 and label_int == 1:
+                                    fn += 1
+                                else:  # predicted_label == 0 and label_int == 0
+                                    tn += 1
                 
                 # 计算评估指标
                 test_running_acc = 100 * test_running_acc / total
@@ -472,11 +472,35 @@ if __name__ == "__main__":
                 precision = tp / (tp + fp) if (tp + fp) > 0 else 0
                 recall = tp / (tp + fn) if (tp + fn) > 0 else 0
                 
+                # 计算敏感性(Sensitivity)和特异性(Specificity)
+                sensitivity = recall  # 敏感性就是召回率
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # 特异性
+                
                 # 计算F1分数
                 f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
                 
                 print(f'     Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1_score:.4f}')
+                print(f'     Sensitivity: {sensitivity:.4f}, Specificity: {specificity:.4f}')
                 print(f'     Confusion Matrix: TP={tp}, FP={fp}, FN={fn}, TN={tn}')
+                log_file.write(f'     Sensitivity: {sensitivity:.4f}, Specificity: {specificity:.4f}\n')
+                log_file.write(f'     Confusion Matrix: TP={tp}, FP={fp}, FN={fn}, TN={tn}\n')
+                
+                # 绘制ROC曲线（仅适用于二分类问题）
+                if num_classes == 2 and len(all_labels) > 0:
+                    fpr, tpr, _ = roc_curve(all_labels, all_probs)
+                    roc_auc = auc(fpr, tpr)
+                    
+                    plt.figure(figsize=(8, 6))
+                    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+                    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+                    plt.xlim([0.0, 1.0])
+                    plt.ylim([0.0, 1.05])
+                    plt.xlabel('False Positive Rate')
+                    plt.ylabel('True Positive Rate')
+                    plt.title(f'ROC Curve - Run {n_runs}, Epoch {epoch}')
+                    plt.legend(loc="lower right")
+                    plt.savefig(os.path.join(path, f'run_{n_runs}_epoch_{epoch}_roc_curve.png'))
+                    plt.close()
 
                 # 打印每个类别的准确率
                 log_file.write('     test Class-wise accuracy:\n')
@@ -513,7 +537,12 @@ if __name__ == "__main__":
                     test_max_acc = f1_score
                     torch.save(net.state_dict(), path + '/model.pt')
                     with open(path + '/test_metrics.txt', "w") as test_save:
-                        test_save.write(f"F1 Score: {f1_score:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nAccuracy: {test_running_acc:.3f}%")
+                        test_save.write(f"F1 Score: {f1_score:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nAccuracy: {test_running_acc:.3f}%\nSensitivity: {sensitivity:.3f}\nSpecificity: {specificity:.3f}")
+                    
+                    # 如果是二分类问题，保存ROC曲线的AUC值
+                    if num_classes == 2 and len(all_labels) > 0:
+                        with open(path + '/roc_auc.txt', "w") as roc_file:
+                            roc_file.write(f"ROC AUC: {roc_auc:.3f}\n")
                     
                     # 保存模型结构信息
                     with open(path + '/model_structure.txt', "w") as model_structure_file:
