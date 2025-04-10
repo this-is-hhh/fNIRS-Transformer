@@ -279,7 +279,7 @@ class fNIRS_T(nn.Module):
 
         # Transformer和Mamba层 - 维度需要调整为feature_dim
         self.transformer_channel = Transformer(feature_dim, depth, heads, dim_head, mlp_dim, dropout)
-        self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
+        # self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
 
         self.pool = pool
         self.to_latent = nn.Identity()

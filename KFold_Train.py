@@ -301,7 +301,7 @@ if __name__ == "__main__":
                 net = fNIRS_PreT(n_class=3, sampling_point=sampling_points, dim=128, depth=6, heads=8, mlp_dim=64).to(device)
         elif dataset[dataset_id] == 'D':
             if models[models_id] == 'fNIRS-T':
-                net = fNIRS_T(n_class=2, sampling_point=sampling_points, dim = 128, depth=6, heads=8, mlp_dim=64).to(device)
+                net = fNIRS_T(n_class=2, sampling_point=sampling_points, dim=128, depth=6, heads=8, mlp_dim=64).to(device)
         
 
         criterion = LabelSmoothing(0.1)  # 使用标签平滑，平滑系数为0.1
