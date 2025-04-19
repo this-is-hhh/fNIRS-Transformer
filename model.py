@@ -4,7 +4,6 @@ from einops import rearrange, repeat
 from torch import nn, einsum
 from einops.layers.torch import Rearrange
 import math
-from mamba_ssm import Mamba
 
 
 class Residual(nn.Module):
@@ -161,12 +160,12 @@ class FrequencyDomainEmbedding(nn.Module):
         self.norm = nn.LayerNorm(dim)
         
     def forward(self, x):
-        # x shape: [batch, 2, channels, sampling_points]
+        # x shape: [batch, 1, channels, sampling_points]
         batch, types, channels, _ = x.shape
         
         # 对每个通道进行FFT变换
         freq_features = []
-        for t in range(types):  # 对脱氧和有氧分别处理
+        for t in range(types):  # 只处理一种类型的信号
             for c in range(channels):  # 对每个通道处理
                 # 提取当前通道的时域信号
                 signal = x[:, t, c, :]
@@ -208,7 +207,7 @@ class MultiScaleEmbedding(nn.Module):
         
         # 添加频域特征提取
         self.freq_embedding = FrequencyDomainEmbedding(
-            in_channels=in_channels, 
+            in_channels=1, 
             out_channels=out_channels, 
             sampling_point=sampling_point, 
             dim=dim, 
@@ -243,7 +242,7 @@ class fNIRS_T(nn.Module):
 
     Args:
         n_class: number of classes.
-        sampling_point: sampling points of input fNIRS signals. Input shape is [B, 2, fNIRS channels, sampling points].
+        sampling_point: sampling points of input fNIRS signals. Input shape is [B, 1, fNIRS channels, sampling points].
         dim: last dimension of output tensor after linear transformation.
         depth: number of Transformer blocks.
         heads: number of the multi-head self-attention.
@@ -262,7 +261,7 @@ class fNIRS_T(nn.Module):
 
         # 多尺度时域特征提取
         self.to_channel_embedding = MultiScaleEmbedding(
-            in_channels=2, out_channels=8, sampling_point=sampling_point, dim=dim, kernel_lengths=[50, 25, 12], stride=4
+            in_channels=1, out_channels=8, sampling_point=sampling_point, dim=dim, kernel_lengths=[50, 25, 12], stride=4
         )
 
         # 计算位置编码的大小：7个区域令牌 + 通道特征数量
@@ -271,6 +270,15 @@ class fNIRS_T(nn.Module):
         
         # 位置编码 - 注意：维度需要调整为feature_dim以匹配拼接后的特征维度
         self.pos_embedding_channel = nn.Parameter(torch.randn(1, total_tokens, feature_dim))
+
+        # # 正弦/余弦位置编码
+        # position = torch.arange(total_tokens).unsqueeze(1)
+        # div_term = torch.exp(torch.arange(0, feature_dim, 2) * (-math.log(10000.0) / feature_dim))
+        # pe = torch.zeros(1, total_tokens, feature_dim)
+        # pe[0, :, 0::2] = torch.sin(position * div_term)
+        # pe[0, :, 1::2] = torch.cos(position * div_term)
+        # self.pos_embedding_channel = nn.Parameter(pe)
+        # self.pos_embedding_channel.requires_grad = False
         
         # 区域令牌 - 维度需要调整为feature_dim以匹配拼接后的特征维度
         self.region_token_channel = nn.Parameter(torch.randn(1, 7, feature_dim))
@@ -296,7 +304,7 @@ class fNIRS_T(nn.Module):
         x2 = self.to_channel_embedding(img)    
         
         b, n, d = x2.shape
-        
+
         # 不再分割频域和时域特征，而是直接使用它们的组合
         # x2的形状为 [batch, num_channels, 2*dim]，其中包含了频域和时域信息
         

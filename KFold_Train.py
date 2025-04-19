@@ -182,46 +182,18 @@ if __name__ == "__main__":
         # feature, label = Load_Dataset_D()
         
         feature = np.load('/data0/zxj_data/total/feature/concatenated_data.npy',allow_pickle=True)
+        feature = feature[:, 1:, :, :]
         # feature[:, 0, :, :] = feature[:, 1, :, :]
         print('feature shape:',feature.shape)
-        # feature = np.load('/data0/zxj_data/fNIRS/VFT/feature/features_augmented.npy')
-        # feature = feature[:, :, :20, 500:756]
-        # print('feature.shape:',feature.shape)
         
         label = np.load('/data0/zxj_data/total/label/label_squeezed.npy',allow_pickle=True)
         print('label :',label)
 
-        # print('label.shape:',label.shape)
-        # 假设原始 feature 和 label 的形状如下
-        # feature = np.load('/data0/zxj_data/fNIRS/VFT/feature/features_augmented.npy')  # (999, 2, 53, 2048)
-        # label = np.load('/data0/zxj_data/fNIRS/VFT/feature/labels_combined_shuffled.npy')  # (999,)
 
-        # # 截取特征维度 2048 为 256 的块大小
-        # block_size = 256
-        # num_blocks = feature.shape[-1] // block_size  # 2048 // 256 = 8
-
-        # # 验证可以整除
-        # assert feature.shape[-1] % block_size == 0, "2048 不能被 block_size 整除！"
-
-        # # 重新生成 feature
-        # new_features = feature.reshape(feature.shape[0], feature.shape[1], feature.shape[2], num_blocks, block_size)
-        # new_features = new_features.transpose(0, 3, 1, 2, 4)  # 调整维度顺序：把 num_blocks 提到样本维度
-        # new_features = new_features.reshape(-1, feature.shape[1], feature.shape[2], block_size)  # 展平样本维度
-
-        # # 重新生成 label
-        # new_labels = np.repeat(label, num_blocks)
-
-        # # 打印新特征和标签的形状
-        # print("Original feature shape:", feature.shape)  # (999, 2, 53, 2048)
-        # print("Original label shape:", label.shape)      # (999,)
-        # print("New feature shape:", new_features.shape)  # (7992, 2, 53, 256)
-        # print("New label shape:", new_labels.shape)      # (7992,)
-
-    # feature = new_features
-    # label = new_labels
     _, _, channels, sampling_points = feature.shape
 
     feature = feature.reshape((label.shape[0], -1))
+    print('feature.shape:', feature.shape)
     # 5 × 5-fold-CV
 
     indices = np.arange(len(feature))
@@ -260,9 +232,9 @@ if __name__ == "__main__":
         y_test = label[test_index]
         print('y_test.shape:',y_test.shape)
 
-        X_train = X_train.reshape((X_train.shape[0], 2, channels, -1))
+        X_train = X_train.reshape((X_train.shape[0], 1, channels, -1))
         print('X_train.shape:',X_train.shape)
-        X_test = X_test.reshape((X_test.shape[0], 2, channels, -1))
+        X_test = X_test.reshape((X_test.shape[0], 1, channels, -1))
         print('X_test.shape:',X_test.shape)
 
         # 论文数据
