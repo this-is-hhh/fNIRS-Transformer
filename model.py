@@ -38,7 +38,52 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-class Attention(nn.Module):
+class FeatureDiscretizer(nn.Module):
+    """特征离散化模块，将连续特征转换为离散特征表示"""
+    def __init__(self, dim, num_features=5, dropout=0.):
+        super().__init__()
+        self.num_features = num_features
+        
+        # 特征提取器 - 将输入特征映射到不同的离散特征空间
+        self.feature_extractors = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(dim, dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim // 2, 1)
+            ) for _ in range(num_features)
+        ])
+        
+        # 特征激活函数 - 使用sigmoid将特征值映射到0-1之间
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        # x shape: [batch, seq_len, dim]
+        batch_size, seq_len, _ = x.shape
+        
+        # 提取离散特征
+        features = []
+        feature_scores = []
+        
+        for extractor in self.feature_extractors:
+            # 提取特征得分 [batch, seq_len, 1]
+            score = extractor(x)
+            # 应用sigmoid将得分映射到0-1之间
+            score = self.sigmoid(score)
+            feature_scores.append(score)
+            
+            # 根据得分生成特征表示
+            # 如果得分大于0.5，则认为该特征存在
+            feature = (score > 0.5).float()
+            features.append(feature)
+        
+        # 将所有特征拼接 [batch, seq_len, num_features]
+        features = torch.cat(features, dim=-1)
+        feature_scores = torch.cat(feature_scores, dim=-1)
+        
+        return features, feature_scores
+
+class InterpretableAttention(nn.Module):
     def __init__(self, dim, heads=8, dim_head=64, dropout=0.,num_channels=53, num_regions=7):
         super().__init__()
         inner_dim = dim_head * heads
@@ -70,24 +115,29 @@ class Attention(nn.Module):
 
         self.num_regions = num_regions
         self.num_channels = num_channels
-
-
+        
+        # 特征离散化模块
+        self.feature_discretizer = FeatureDiscretizer(dim, num_features=5, dropout=dropout)
+        
+        # 为每个离散特征创建专门的注意力头
+        self.feature_attention_weights = nn.Parameter(torch.ones(heads, 5))
+        self.softmax = nn.Softmax(dim=-1)
+        
     def forward(self, x, mask=None):
         b, n, _, h = *x.shape, self.heads
+        
+        # 特征离散化
+        discrete_features, feature_scores = self.feature_discretizer(x)
+        
+        # 计算QKV
         qkv = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), qkv)
 
+        # 计算注意力得分
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
         mask_value = -torch.finfo(dots.dtype).max
-        # if mask is not None:
-        #     mask = F.pad(mask.flatten(1), (1, 0), value=True)
-        #     assert mask.shape[-1] == dots.shape[-1], 'mask has incorrect dimensions'
-        #     mask = rearrange(mask, 'b i -> b () i ()') * rearrange(mask, 'b j -> b () () j')
-        #     dots.masked_fill_(~mask, mask_value)
-        #     del mask
-
         
-         # 生成交互掩码
+        # 生成交互掩码
         interaction_mask = torch.zeros((1, n, n), dtype=torch.bool, device=x.device)
         
         # Region tokens 只能与指定的通道交互
@@ -102,17 +152,54 @@ class Attention(nn.Module):
         interaction_mask[:, self.num_regions:, self.num_regions:] = True
 
         dots.masked_fill_(~interaction_mask, mask_value)
+        
+        # 根据离散特征调整注意力权重
+        # 计算每个头对每个特征的权重
+        feature_weights = self.softmax(self.feature_attention_weights)  # [heads, num_features]
+        
+        # 将特征得分扩展为与注意力矩阵相同的形状
+        # [batch, seq_len, num_features] -> [batch, 1, seq_len, 1, num_features]
+        expanded_scores = feature_scores.unsqueeze(1).unsqueeze(3)
+        
+        # 将特征权重扩展为与注意力矩阵相同的形状
+        # [heads, num_features] -> [1, heads, 1, 1, num_features]
+        expanded_weights = feature_weights.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        
+        # 计算特征加权得分 [batch, heads, seq_len, 1, num_features]
+        weighted_scores = expanded_scores * expanded_weights
+        
+        # 沿特征维度求和，得到每个位置的特征加权得分 [batch, heads, seq_len, 1]
+        feature_attention = weighted_scores.sum(dim=-1)
+        
+        # 将特征加权得分添加到原始注意力得分中
+        # 扩展feature_attention以匹配dots的形状 [batch, heads, seq_len, seq_len]
+        feature_attention = feature_attention.expand(-1, -1, -1, dots.size(-1))
+        
+        # 将特征注意力添加到原始注意力中
+        dots = dots + feature_attention
 
-
+        # 计算softmax得到最终注意力权重
         attn = dots.softmax(dim=-1)
 
+        # 应用注意力权重到值向量
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
+        
+        # 保存特征得分和注意力权重，用于可视化和解释
+        self.last_feature_scores = feature_scores
+        self.last_attn_weights = attn
+        self.last_discrete_features = discrete_features
 
         return out
-        # 只返回 7 个 region tokens
-        # return out[:, :self.num_regions, :]
+
+class Attention(InterpretableAttention):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.,num_channels=53, num_regions=7):
+        super().__init__(dim, heads, dim_head, dropout, num_channels, num_regions)
+
+    def forward(self, x, mask=None):
+        # 调用父类的forward方法获取注意力输出
+        return super().forward(x, mask)
 
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
@@ -130,21 +217,22 @@ class Transformer(nn.Module):
         return x
 
 
-class BidirectionalMambaBlock(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.mamba_forward = Mamba(dim)
-        self.mamba_reverse = Mamba(dim)
+# class BidirectionalMambaBlock(nn.Module):
+#     def __init__(self, dim):
+#         super().__init__()
+#         self.mamba_forward = Mamba(dim)
+#         self.mamba_reverse = Mamba(dim)
 
-    def forward(self, x):
-        z1 = self.mamba_forward(x)
-        z2 = torch.flip(x, dims=[1])  # Reverse the sequence
-        z2 = self.mamba_reverse(z2)
-        z2 = torch.flip(z2, dims=[1])  # Flip back after processing
+#     def forward(self, x):
+#         z1 = self.mamba_forward(x)
+#         z2 = torch.flip(x, dims=[1])  # Reverse the sequence
+#         z2 = self.mamba_reverse(z2)
+#         z2 = torch.flip(z2, dims=[1])  # Flip back after processing
         
-        z_prime = z1 + z2
-        z_double_prime = z_prime + x
-        return z_double_prime
+#         z_prime = z1 + z2
+#         z_double_prime = z_prime + x
+#         return z_double_prime
+
 
 class FrequencyDomainEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels, sampling_point, dim, n_freq_bands=10):
@@ -279,7 +367,7 @@ class fNIRS_T(nn.Module):
 
         # Transformer和Mamba层 - 维度需要调整为feature_dim
         self.transformer_channel = Transformer(feature_dim, depth, heads, dim_head, mlp_dim, dropout)
-        self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
+        # self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
 
         self.pool = pool
         self.to_latent = nn.Identity()
@@ -289,6 +377,15 @@ class fNIRS_T(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(feature_dim, n_class))
+            
+        # 特征名称列表，用于可解释性分析
+        self.feature_names = [
+            "高频活动",  # 高频脑电活动
+            "低频活动",  # 低频脑电活动
+            "血氧变化",  # 血氧浓度变化
+            "区域连接",  # 脑区连接强度
+            "时间变化"   # 时间序列变化特征
+        ]
 
 
     def forward(self, img, mask=None):
@@ -311,18 +408,93 @@ class fNIRS_T(nn.Module):
         # 注意：位置编码的大小需要匹配 7(区域令牌) + n(通道特征)
         combined_features += self.pos_embedding_channel[:, :combined_features.shape[1]]
         combined_features = self.dropout_channel(combined_features)
-        # print("combined_features: ", combined_features.shape)
-        # print("region_tokens: ", region_tokens.shape)
-        # print("x2: ", x2.shape)
-        # print("pos_embedding_channel: ", self.pos_embedding_channel.shape)
-        # print("pos_embedding_channel[:, :combined_features.shape[1]]: ", self.pos_embedding_channel[:, :combined_features.shape[1]].shape)
-        # print("combined_features + pos_embedding_channel[:, :combined_features.shape[1]]: ", combined_features.shape)
+        
         # 通过transformer处理
         x2 = self.transformer_channel(combined_features, mask)
-        # print("x2 after transformer: ", x2.shape)
         
         # 只取区域令牌部分进行分类（前7个token）
         x2 = x2[:, :7, :]
         x2 = x2.mean(dim=1) if self.pool == 'mean' else x2[:, 0]
         
+        # 获取模型的可解释性信息
+        self.feature_importance = self._get_feature_importance()
+        self.attention_patterns = self._get_attention_patterns()
+        
         return self.mlp_head(x2)
+    
+    def _get_feature_importance(self):
+        """获取每个离散特征的重要性"""
+        feature_importance = {}
+        
+        # 遍历Transformer层中的所有注意力模块
+        for i, (attn, _) in enumerate(self.transformer_channel.layers):
+            # 获取注意力模块
+            attention_module = attn.fn.fn
+            
+            # 检查是否是InterpretableAttention类型
+            if hasattr(attention_module, 'feature_attention_weights'):
+                # 获取特征权重
+                weights = attention_module.feature_attention_weights.softmax(dim=-1)
+                
+                # 计算每个特征的平均重要性
+                avg_weights = weights.mean(dim=0)  # 平均所有头的权重
+                
+                # 将特征名称与重要性关联
+                for j, name in enumerate(self.feature_names):
+                    if j < avg_weights.size(0):
+                        feature_importance[f"layer_{i}_{name}"] = avg_weights[j].item()
+                
+                # 如果有最后一次计算的特征得分，也保存下来
+                if hasattr(attention_module, 'last_feature_scores'):
+                    feature_scores = attention_module.last_feature_scores
+                    for j, name in enumerate(self.feature_names):
+                        if j < feature_scores.size(-1):
+                            feature_importance[f"score_{i}_{name}"] = feature_scores[0, 0, j].item()
+        
+        return feature_importance
+    
+    def _get_attention_patterns(self):
+        """获取注意力模式，用于可视化"""
+        attention_patterns = {}
+        
+        # 遍历Transformer层中的所有注意力模块
+        for i, (attn, _) in enumerate(self.transformer_channel.layers):
+            # 获取注意力模块
+            attention_module = attn.fn.fn
+            
+            # 检查是否有保存的注意力权重
+            if hasattr(attention_module, 'last_attn_weights'):
+                # 获取注意力权重并确保形状正确
+                attn_weights = attention_module.last_attn_weights.detach()
+                
+                # 如果形状是[batch, heads, seq_len, seq_len]，取第一个batch和第一个head
+                if len(attn_weights.shape) == 4:
+                    attn_weights = attn_weights[0, 0]
+                # 如果形状是[heads, seq_len, seq_len]，取第一个head
+                elif len(attn_weights.shape) == 3:
+                    attn_weights = attn_weights[0]
+                
+                # 确保注意力权重是二维矩阵
+                if len(attn_weights.shape) == 1:
+                    seq_len = int(math.sqrt(attn_weights.shape[0]))
+                    attn_weights = attn_weights.view(seq_len, seq_len)
+                
+                # 保存处理后的注意力权重
+                attention_patterns[f"layer_{i}_attention"] = attn_weights
+                
+                # 如果有离散特征，也保存下来
+                if hasattr(attention_module, 'last_discrete_features'):
+                    attention_patterns[f"layer_{i}_discrete_features"] = attention_module.last_discrete_features.detach()
+        
+        return attention_patterns
+    
+    def get_interpretable_features(self):
+        """返回模型的可解释性特征，用于分析和可视化"""
+        if not hasattr(self, 'feature_importance') or not hasattr(self, 'attention_patterns'):
+            raise RuntimeError("必须先运行forward方法才能获取可解释性特征")
+        
+        return {
+            "feature_names": self.feature_names,
+            "feature_importance": self.feature_importance,
+            "attention_patterns": self.attention_patterns
+        }

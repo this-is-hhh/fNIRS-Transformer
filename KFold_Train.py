@@ -569,3 +569,109 @@ if __name__ == "__main__":
         plt.legend()
         plt.savefig(os.path.join(path, f'run_{n_runs}_accuracy_curve.png'))  # 保存 Accuracy 图表
         plt.close()
+        
+        # 生成可解释性图片
+        try:
+            # 使用测试集的一个批次来获取可解释性特征
+            net.eval()
+            with torch.no_grad():
+                for data in test_loader:
+                    inputs, labels = data
+                    inputs = inputs.to(device)
+                    labels = labels.to(device)
+                    _ = net(inputs)  # 运行前向传播以获取可解释性特征
+                    break
+            
+            # 获取可解释性特征
+            if hasattr(net, 'get_interpretable_features'):
+                interpretable_features = net.get_interpretable_features()
+                
+                # 绘制特征重要性图
+                plt.figure(figsize=(10, 6))
+                # 提取特征名称和对应的重要性值
+                feature_names = interpretable_features['feature_names']
+                # 只选择与feature_names长度匹配的特征重要性值
+                importance_values = []
+                for name in feature_names:
+                    # 查找包含该特征名称的键的平均值
+                    matching_values = [v for k, v in interpretable_features['feature_importance'].items() if name in k]
+                    if matching_values:
+                        importance_values.append(sum(matching_values) / len(matching_values))
+                    else:
+                        importance_values.append(0)  # 如果没有匹配的值，则设为0
+                
+                # 确保两个数组长度相同
+                assert len(feature_names) == len(importance_values), f"形状不匹配: feature_names长度为{len(feature_names)}，importance_values长度为{len(importance_values)}"
+                
+                plt.bar(feature_names, importance_values)
+                plt.title('Feature Importance')
+                plt.xlabel('Features')
+                plt.ylabel('Importance')
+                plt.xticks(rotation=45)
+                plt.tight_layout() 
+                plt.savefig(os.path.join(save_path, f'feature_importance_fold_{fold}.jpg'))
+                plt.close()
+                
+                # 绘制注意力模式图
+                for layer, attn_weights in interpretable_features['attention_patterns'].items():
+                    plt.figure(figsize=(10, 6))
+                    plt.imshow(attn_weights[0].cpu().numpy(), cmap='viridis')
+                    plt.title(f'Attention Pattern - {layer}')
+                    plt.colorbar()
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_path, f'attention_pattern_{layer}_fold_{fold}.jpg'))
+                    plt.close()
+                    
+                    # 绘制区域连接热图 - 只关注前7个token（区域令牌）
+                    plt.figure(figsize=(8, 6))
+                    region_attn = attn_weights[:7, :7].cpu().numpy()
+                    plt.imshow(region_attn, cmap='hot')
+                    plt.colorbar()
+                    plt.title(f'Layer {layer} Region Connectivity')
+                    plt.savefig(os.path.join(path, f'run_{n_runs}_layer_{layer}_region_connectivity.png'))
+                    plt.close()
+                    
+                    # 绘制通道重要性热图 - 区域令牌对各通道的注意力
+                    plt.figure(figsize=(12, 6))
+                    channel_importance = attn_weights[:7, 7:].cpu().numpy()
+                    plt.imshow(channel_importance, cmap='coolwarm')
+                    plt.colorbar()
+                    plt.title(f'Layer {layer} Channel Importance')
+                    plt.xlabel('Channels')
+                    plt.ylabel('Brain Regions')
+                    plt.savefig(os.path.join(path, f'run_{n_runs}_layer_{layer}_channel_importance.png'))
+                    plt.close()
+        except Exception as e:
+            print(f"生成可解释性图片时出错: {e}")
+            with open(os.path.join(path, 'error_log.txt'), 'a') as error_log:
+                error_log.write(f"生成可解释性图片时出错: {e}\n")
+# 在每个折结束后调用模型的get_interpretable_features()方法，并使用matplotlib保存生成的图片为JPG格式
+try:
+    interpretable_features = net.get_interpretable_features()
+    # 创建一个可视化摘要图，而不是直接将字典传递给imshow
+    plt.figure(figsize=(10, 6))
+    
+    # 从字典中提取一个注意力权重矩阵用于可视化
+    # 选择第一个注意力模式作为示例
+    if interpretable_features['attention_patterns']:
+        # 获取第一个注意力层的权重
+        first_layer_key = list(interpretable_features['attention_patterns'].keys())[0]
+        attn_weights = interpretable_features['attention_patterns'][first_layer_key]
+        
+        # 确保我们只使用第一个批次的第一个头的注意力权重
+        # 转换为2D numpy数组以便可视化
+        attn_matrix = attn_weights[0].cpu().numpy()
+        
+        # 绘制注意力矩阵
+        plt.imshow(attn_matrix, cmap='viridis')
+        plt.colorbar()
+        plt.title(f'Attention Weights - {first_layer_key}')
+        plt.savefig(os.path.join(path, 'interpretable_features.jpg'))
+    else:
+        print("没有可用的注意力模式进行可视化")
+    plt.close()
+except Exception as e:
+    print(f"生成解释性特征图片时出错: {e}")
+    with open(os.path.join(path, 'error_log.txt'), 'a') as error_log:
+        error_log.write(f"生成解释性特征图片时出错: {e}\n")
+plt.close()
