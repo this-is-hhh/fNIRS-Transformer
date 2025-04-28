@@ -281,47 +281,53 @@ class FrequencyDomainEmbedding(nn.Module):
         
         return self.norm(freq_features)
 
+
 class MultiScaleEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels, sampling_point, dim, kernel_lengths, stride):
         super().__init__()
+        # 多尺度时域卷积分支
         self.conv_layers = nn.ModuleList([
-            nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                      kernel_size=(1, k), stride=(1, stride),
-                      padding=(0, (k - 1) // 2))  # 添加 padding
-            for k in kernel_lengths
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=(1, k),
+                stride=(1, stride),
+                padding=(0, (k - 1) // 2)  # 保持宽度一致
+            ) for k in kernel_lengths
         ])
+        # 计算最大的输出宽度，并用于全连接层输入维度
         out_w = math.floor((sampling_point - max(kernel_lengths) + (max(kernel_lengths) - 1) // 2 * 2) / stride) + 1
         self.proj = nn.Linear(len(kernel_lengths) * out_channels * out_w, dim)
-        self.norm = nn.LayerNorm(dim)
-        
-        # 添加频域特征提取
+        self.norm_time = nn.LayerNorm(dim)
+
+        # 频域特征提取分支
         self.freq_embedding = FrequencyDomainEmbedding(
-            in_channels=in_channels, 
-            out_channels=out_channels, 
-            sampling_point=sampling_point, 
-            dim=dim, 
+            in_channels=in_channels,
+            out_channels=out_channels,
+            sampling_point=sampling_point,
+            dim=dim,
             n_freq_bands=20
         )
 
+        # 在拼接后添加 LayerNorm
+        self.norm_fuse = nn.LayerNorm(2 * dim)
+
     def forward(self, x):
         # 时域特征提取
-        features = [conv(x) for conv in self.conv_layers]
-        features = torch.cat(features, dim=1)  # 现在所有 feature 维度匹配了
-        features = rearrange(features, 'b c h w -> b h (c w)')
-        features = self.proj(features)
-        time_features = self.norm(features)
-        
+        time_feats = [conv(x) for conv in self.conv_layers]
+        time_feats = torch.cat(time_feats, dim=1)          # [B, C_out*K, 1, W]
+        time_feats = rearrange(time_feats, 'b c h w -> b h (c w)')
+        time_feats = self.proj(time_feats)                 # [B, 1, dim]
+        time_features = self.norm_time(time_feats)
+
         # 频域特征提取
-        freq_features = self.freq_embedding(x)
-        
-        # 拼接时域和频域特征
-        # 将同一通道的频域和时域特征在维度上拼接，而不是在序列长度上拼接
-        # 时域特征形状: [batch, num_channels, dim]
-        # 频域特征形状: [batch, num_channels, dim]
-        # 拼接后形状: [batch, num_channels, 2*dim]
-        combined_features = torch.cat([freq_features, time_features], dim=2)
-        
+        freq_features = self.freq_embedding(x)             # 假设返回 [B, 1, dim]
+
+        # 拼接时域和频域特征，并归一化
+        combined = torch.cat([freq_features, time_features], dim=2)  # [B, 1, 2*dim]
+        combined_features = self.norm_fuse(combined)
         return combined_features
+
         
 
 
