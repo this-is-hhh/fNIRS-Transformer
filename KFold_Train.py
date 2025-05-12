@@ -241,6 +241,20 @@ if __name__ == "__main__":
     train_accuracies = []
     test_losses = []
     test_accuracies = []
+    
+    # 创建一个统一的文件来保存所有折的预测结果
+    all_folds_predictions_file = os.path.join(save_path, 'all_folds_predictions.txt')
+    with open(all_folds_predictions_file, 'w') as all_pred_file:
+        all_pred_file.write(f"所有折的预测结果详情\n\n")
+        all_pred_file.write(f"实验配置: {exp_config}\n")
+        all_pred_file.write(f"时间戳: {timestamp}\n\n")
+    
+    # 创建一个统一的文件来保存所有折的预测结果
+    all_folds_predictions_file = os.path.join(save_path, 'all_folds_predictions.txt')
+    with open(all_folds_predictions_file, 'w') as all_pred_file:
+        all_pred_file.write(f"所有折的预测结果详情\n\n")
+        all_pred_file.write(f"实验配置: {exp_config}\n")
+        all_pred_file.write(f"时间戳: {timestamp}\n\n")
 
     n_runs = 0
     # for train_index, test_index in skf.split(feature):
@@ -269,8 +283,8 @@ if __name__ == "__main__":
         # tq = 256
         # gamma = 20
 
-        tq = 2400  # Total time duration for each question
-        gamma = 200  # Upper bound for masking/warping duration
+        # tq = 2400  # Total time duration for each question
+        # gamma = 200  # Upper bound for masking/warping duration
         #不增强
         # X_train_augmented = X_trainß
 
@@ -347,6 +361,12 @@ if __name__ == "__main__":
         with open(log_file_path, 'w') as log_file:
         
             test_max_acc = 0
+            best_epoch = -1
+            best_correct_indices = []
+            best_incorrect_indices = []
+            best_true_labels = []
+            best_pred_labels = []
+            best_sample_indices = []
             for epoch in range(EPOCH):
                 net.train()
                 train_running_acc = 0
@@ -423,11 +443,19 @@ if __name__ == "__main__":
                 all_labels = []  # 用于ROC曲线
                 all_probs = []   # 用于ROC曲线
                 
+                # 用于记录预测结果的列表
+                correct_indices = []  # 预测正确的样本索引
+                incorrect_indices = []  # 预测错误的样本索引
+                true_labels = []  # 真实标签
+                pred_labels = []  # 预测标签
+                sample_indices = []  # 原始样本索引（在test_index中的位置）
+                
                 net.eval()
                 test_running_acc = 0
                 total = 0
                 loss_steps = []
                 with torch.no_grad():
+                    batch_idx = 0
                     for data in test_loader:
                         inputs, labels = data
                         inputs = inputs.to(device)
@@ -448,21 +476,39 @@ if __name__ == "__main__":
                         
                         # 按类别统计和累积混淆矩阵
                         for i in range(labels.size(0)):
-                            label_int = int(labels[i].item())  # 获取原始标签整数值
-                            predicted_label = int(pred[i].item())  # 获取预测标签整数值
-                            class_correct[label_int] += (predicted_label == label_int)
-                            class_total[label_int] += 1
-                            
-                            # 累积统计混淆矩阵（二分类问题）
-                            if num_classes == 2:
-                                if predicted_label == 1 and label_int == 1:
-                                    tp += 1
-                                elif predicted_label == 1 and label_int == 0:
-                                    fp += 1
-                                elif predicted_label == 0 and label_int == 1:
-                                    fn += 1
-                                else:  # predicted_label == 0 and label_int == 0
-                                    tn += 1
+                            # 计算当前样本在测试集中的索引
+                            sample_idx = batch_idx * test_loader.batch_size + i
+                            if sample_idx < len(test_index):  # 确保不超出测试集索引范围
+                                original_idx = test_index[sample_idx]  # 获取原始数据集中的索引
+                                
+                                label_int = int(labels[i].item())  # 获取原始标签整数值
+                                predicted_label = int(pred[i].item())  # 获取预测标签整数值
+                                
+                                # 记录预测结果
+                                sample_indices.append(original_idx)
+                                true_labels.append(label_int)
+                                pred_labels.append(predicted_label)
+                                
+                                if predicted_label == label_int:
+                                    correct_indices.append(original_idx)
+                                else:
+                                    incorrect_indices.append(original_idx)
+                                
+                                class_correct[label_int] += (predicted_label == label_int)
+                                class_total[label_int] += 1
+                                
+                                # 累积统计混淆矩阵（二分类问题）
+                                if num_classes == 2:
+                                    if predicted_label == 1 and label_int == 1:
+                                        tp += 1
+                                    elif predicted_label == 1 and label_int == 0:
+                                        fp += 1
+                                    elif predicted_label == 0 and label_int == 1:
+                                        fn += 1
+                                    else:  # predicted_label == 0 and label_int == 0
+                                        tn += 1
+                        
+                        batch_idx += 1
                 
                 # 计算评估指标
                 test_running_acc = 100 * test_running_acc / total
@@ -535,6 +581,14 @@ if __name__ == "__main__":
 
                 if f1_score > test_max_acc:  # 使用F1分数作为保存模型的指标
                     test_max_acc = f1_score
+                    best_epoch = epoch
+                    # 保存当前最佳epoch的预测结果
+                    best_correct_indices = correct_indices.copy()
+                    best_incorrect_indices = incorrect_indices.copy()
+                    best_true_labels = true_labels.copy()
+                    best_pred_labels = pred_labels.copy()
+                    best_sample_indices = sample_indices.copy()
+                    
                     torch.save(net.state_dict(), path + '/model.pt')
                     with open(path + '/test_metrics.txt', "w") as test_save:
                         test_save.write(f"F1 Score: {f1_score:.3f}\nPrecision: {precision:.3f}\nRecall: {recall:.3f}\nAccuracy: {test_running_acc:.3f}%\nSensitivity: {sensitivity:.3f}\nSpecificity: {specificity:.3f}")
@@ -547,8 +601,95 @@ if __name__ == "__main__":
                     # 保存模型结构信息
                     with open(path + '/model_structure.txt', "w") as model_structure_file:
                         model_structure_file.write(f"7 regions, multiscale 50\n")
+                    
+                    # 保存当前最佳epoch的预测结果
+                    best_correct_indices = correct_indices.copy()
+                    best_incorrect_indices = incorrect_indices.copy()
+                    best_true_labels = true_labels.copy()
+                    best_pred_labels = pred_labels.copy()
+                    best_sample_indices = sample_indices.copy()
+                    best_epoch = epoch
+                    
+                    # 保存预测结果详情到当前折的文件
+                    with open(path + '/prediction_details.txt', "w") as pred_file:
+                        pred_file.write(f"折数: {n_runs}, 最佳Epoch: {epoch}\n\n")
+                        
+                        # 保存正确预测的样本信息
+                        pred_file.write(f"正确预测的样本数: {len(correct_indices)}\n")
+                        pred_file.write("样本序号\t真实标签\t预测标签\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            if idx in correct_indices:
+                                pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                        
+                        # 保存错误预测的样本信息
+                        pred_file.write(f"\n错误预测的样本数: {len(incorrect_indices)}\n")
+                        pred_file.write("样本序号\t真实标签\t预测标签\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            if idx in incorrect_indices:
+                                pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                        
+                        # 保存所有样本的预测结果
+                        pred_file.write(f"\n所有样本的预测结果:\n")
+                        pred_file.write("样本序号\t真实标签\t预测标签\t预测结果\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            result = "正确" if true_label == pred_label else "错误"
+                            pred_file.write(f"{idx}\t{true_label}\t{pred_label}\t{result}\n")
+                    
+                    # 同时将结果追加到统一的预测结果文件中
+                    with open(all_folds_predictions_file, 'a') as all_pred_file:
+                        all_pred_file.write(f"============ 折数: {n_runs}, 最佳Epoch: {epoch} ============\n\n")
+                        
+                        # 追加正确预测的样本信息
+                        all_pred_file.write(f"正确预测的样本数: {len(correct_indices)}\n")
+                        all_pred_file.write("样本序号\t真实标签\t预测标签\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            if idx in correct_indices:
+                                all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                        
+                        # 追加错误预测的样本信息
+                        all_pred_file.write(f"\n错误预测的样本数: {len(incorrect_indices)}\n")
+                        all_pred_file.write("样本序号\t真实标签\t预测标签\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            if idx in incorrect_indices:
+                                all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                        
+                        # 追加所有样本的预测结果
+                        all_pred_file.write(f"\n所有样本的预测结果:\n")
+                        all_pred_file.write("样本序号\t真实标签\t预测标签\t预测结果\n")
+                        for idx, true_label, pred_label in zip(sample_indices, true_labels, pred_labels):
+                            result = "正确" if true_label == pred_label else "错误"
+                            all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\t{result}\n")
+                        
+                        all_pred_file.write("\n\n")
 
                 lrStep.step()
+            
+            # 在每一折训练结束后，将该折最佳epoch的预测结果追加到统一文件中
+            with open(all_folds_predictions_file, 'a') as all_pred_file:
+                all_pred_file.write(f"============ 折数: {n_runs}, 最佳Epoch: {best_epoch} ============\n\n")
+                
+                # 追加正确预测的样本信息
+                all_pred_file.write(f"正确预测的样本数: {len(best_correct_indices)}\n")
+                all_pred_file.write("样本序号\t真实标签\t预测标签\n")
+                for idx, true_label, pred_label in zip(best_sample_indices, best_true_labels, best_pred_labels):
+                    if idx in best_correct_indices:
+                        all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                
+                # 追加错误预测的样本信息
+                all_pred_file.write(f"\n错误预测的样本数: {len(best_incorrect_indices)}\n")
+                all_pred_file.write("样本序号\t真实标签\t预测标签\n")
+                for idx, true_label, pred_label in zip(best_sample_indices, best_true_labels, best_pred_labels):
+                    if idx in best_incorrect_indices:
+                        all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\n")
+                
+                # 追加所有样本的预测结果
+                all_pred_file.write(f"\n所有样本的预测结果:\n")
+                all_pred_file.write("样本序号\t真实标签\t预测标签\t预测结果\n")
+                for idx, true_label, pred_label in zip(best_sample_indices, best_true_labels, best_pred_labels):
+                    result = "正确" if true_label == pred_label else "错误"
+                    all_pred_file.write(f"{idx}\t{true_label}\t{pred_label}\t{result}\n")
+                
+                all_pred_file.write("\n\n")
 
         plt.figure(figsize=(10, 5))
         plt.plot(train_losses, label='Train Loss', color='blue')
@@ -641,11 +782,12 @@ if __name__ == "__main__":
                     plt.ylabel('Brain Regions')
                     plt.savefig(os.path.join(path, f'run_{n_runs}_layer_{layer}_channel_importance.png'))
                     plt.close()
+
         except Exception as e:
             print(f"生成可解释性图片时出错: {e}")
             with open(os.path.join(path, 'error_log.txt'), 'a') as error_log:
                 error_log.write(f"生成可解释性图片时出错: {e}\n")
-# 在每个折结束后调用模型的get_interpretable_features()方法，并使用matplotlib保存生成的图片为JPG格式
+
 try:
     interpretable_features = net.get_interpretable_features()
     # 创建一个可视化摘要图，而不是直接将字典传递给imshow

@@ -4,7 +4,6 @@ from einops import rearrange, repeat
 from torch import nn, einsum
 from einops.layers.torch import Rearrange
 import math
-from mamba_ssm import Mamba
 
 
 class Residual(nn.Module):
@@ -54,19 +53,18 @@ class FeatureDiscretizer(nn.Module):
             ) for _ in range(num_features)
         ])
         
-        # 特征激活函数 - 使用sigmoid将特征值映射到0-1之间
         self.sigmoid = nn.Sigmoid()
         
     def forward(self, x):
         # x shape: [batch, seq_len, dim]
-        batch_size, seq_len, _ = x.shape
+        batch_size, seq_len, _ = x.shape    
         
         # 提取离散特征
         features = []
         feature_scores = []
         
         for extractor in self.feature_extractors:
-            # 提取特征得分 [batch, seq_len, 1]
+            # 提取特征得分 [batch, seq_len, 1]              
             score = extractor(x)
             # 应用sigmoid将得分映射到0-1之间
             score = self.sigmoid(score)
@@ -217,25 +215,10 @@ class Transformer(nn.Module):
         return x
 
 
-# class BidirectionalMambaBlock(nn.Module):
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.mamba_forward = Mamba(dim)
-#         self.mamba_reverse = Mamba(dim)
-
-#     def forward(self, x):
-#         z1 = self.mamba_forward(x)
-#         z2 = torch.flip(x, dims=[1])  # Reverse the sequence
-#         z2 = self.mamba_reverse(z2)
-#         z2 = torch.flip(z2, dims=[1])  # Flip back after processing
-        
-#         z_prime = z1 + z2
-#         z_double_prime = z_prime + x
-#         return z_double_prime
 
 
 class FrequencyDomainEmbedding(nn.Module):
-    def __init__(self, in_channels, out_channels, sampling_point, dim, n_freq_bands=10):
+    def __init__(self, in_channels, out_channels, sampling_point, dim, n_freq_bands=20):
         super().__init__()
         self.n_freq_bands = n_freq_bands
         self.sampling_point = sampling_point
@@ -309,7 +292,6 @@ class MultiScaleEmbedding(nn.Module):
             n_freq_bands=20
         )
 
-        # 在拼接后添加 LayerNorm
         self.norm_fuse = nn.LayerNorm(2 * dim)
 
     def forward(self, x):
@@ -349,9 +331,7 @@ class fNIRS_T(nn.Module):
     """
     def __init__(self, n_class, sampling_point, dim, depth, heads, mlp_dim, pool='cls', dim_head=64, dropout=0., emb_dropout=0.):
         super().__init__()
-        # num_patches = 100
         num_channels = 53  # 实际的fNIRS通道数
-        # 由于MultiScaleEmbedding返回的特征维度是2*dim，我们需要调整模型的其他部分
         feature_dim = 2 * dim  # 特征维度为原始dim的两倍
 
         # 多尺度时域特征提取
@@ -361,36 +341,33 @@ class fNIRS_T(nn.Module):
 
         # 计算位置编码的大小：7个区域令牌 + 通道特征数量
         # 频域和时域特征在维度上拼接，序列长度为num_channels
-        total_tokens = 7 + num_channels  # token数量为区域令牌 + 通道特征（每个通道包含频域和时域信息）
+        total_tokens = 7 + num_channels  
         
-        # 位置编码 - 注意：维度需要调整为feature_dim以匹配拼接后的特征维度
+        # 位置编码 
         self.pos_embedding_channel = nn.Parameter(torch.randn(1, total_tokens, feature_dim))
         
-        # 区域令牌 - 维度需要调整为feature_dim以匹配拼接后的特征维度
+        # 区域令牌 
         self.region_token_channel = nn.Parameter(torch.randn(1, 7, feature_dim))
         
         self.dropout_channel = nn.Dropout(emb_dropout)
 
-        # Transformer和Mamba层 - 维度需要调整为feature_dim
+        # Transformer - 维度需要调整为feature_dim
         self.transformer_channel = Transformer(feature_dim, depth, heads, dim_head, mlp_dim, dropout)
-        # self.mamba_layers = nn.ModuleList([BidirectionalMambaBlock(feature_dim) for _ in range(depth)])
 
         self.pool = pool
         self.to_latent = nn.Identity()
-        # 增强的MLP头部结构，包含两个全连接层和ReLU激活函数
         self.mlp_head = nn.Sequential(
             nn.LayerNorm(feature_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(feature_dim, n_class))
             
-        # 特征名称列表，用于可解释性分析
         self.feature_names = [
-            "高频活动",  # 高频脑电活动
-            "低频活动",  # 低频脑电活动
-            "血氧变化",  # 血氧浓度变化
-            "区域连接",  # 脑区连接强度
-            "时间变化"   # 时间序列变化特征
+            "1",  
+            "2", 
+            "3",  
+            "4",  
+            "5"   
         ]
 
 
@@ -480,22 +457,18 @@ class fNIRS_T(nn.Module):
                 elif len(attn_weights.shape) == 3:
                     attn_weights = attn_weights[0]
                 
-                # 确保注意力权重是二维矩阵
                 if len(attn_weights.shape) == 1:
                     seq_len = int(math.sqrt(attn_weights.shape[0]))
                     attn_weights = attn_weights.view(seq_len, seq_len)
                 
-                # 保存处理后的注意力权重
                 attention_patterns[f"layer_{i}_attention"] = attn_weights
                 
-                # 如果有离散特征，也保存下来
                 if hasattr(attention_module, 'last_discrete_features'):
                     attention_patterns[f"layer_{i}_discrete_features"] = attention_module.last_discrete_features.detach()
         
         return attention_patterns
     
     def get_interpretable_features(self):
-        """返回模型的可解释性特征，用于分析和可视化"""
         if not hasattr(self, 'feature_importance') or not hasattr(self, 'attention_patterns'):
             raise RuntimeError("必须先运行forward方法才能获取可解释性特征")
         
